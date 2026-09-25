@@ -85,9 +85,17 @@ export async function rainEtaTool(raw: RainEtaInput, deps: ToolDeps): Promise<To
 			nextWet = upcoming.find((s) => wet(s.precipitation_mm))?.start ?? null;
 		}
 
-		if (observedRain !== null && observedRain !== wet(series.steps[0]!.precipitation_mm)) {
+		// The step already under way is not searched for transitions, but it is reported, so a forecast
+		// "wet this hour" is not lost when the radar is dry right now (and vice versa).
+		const cur = series.steps.find((s) => Date.parse(s.start) <= nowMs && nowMs < Date.parse(s.end));
+		const currentStep = cur
+			? { start: cur.start, end: cur.end, precipitation_mm: cur.precipitation_mm, forecast_wet: wet(cur.precipitation_mm) }
+			: null;
+		if (observedRain !== null && currentStep && observedRain !== currentStep.forecast_wet) {
 			caveats.push(
-				`The radar observation (${observedRain ? "rain" : "no rain"} now) disagrees with the forecast's current step; trust the radar for the present.`,
+				observedRain
+					? `Radar shows rain now, but the forecast expects only ${currentStep.precipitation_mm} mm in the step ending ${currentStep.end}; the rain may end before then. Trust the radar for the present.`
+					: `Radar shows no rain now, but the forecast expects ${currentStep.precipitation_mm} mm in the step ending ${currentStep.end}; rain may start before then. Trust the radar for the present.`,
 			);
 		}
 		caveats.push(
@@ -105,6 +113,7 @@ export async function rainEtaTool(raw: RainEtaInput, deps: ToolDeps): Promise<To
 			threshold_mm: input.threshold_mm,
 			current_state_basis: basis,
 			wet_now: wetNow,
+			current_step: currentStep,
 			first_dry_step_at: firstDry,
 			next_wet_step_at: nextWet,
 			series_end: series.steps[series.steps.length - 1]!.end,

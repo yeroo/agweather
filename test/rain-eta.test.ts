@@ -85,10 +85,31 @@ describe("rain_eta", () => {
 		expect(s.forecast_based).toMatchObject({ current_state_basis: "forecast_first_step", wet_now: true, first_dry_step_at: "2026-09-25T10:00:00.000Z" });
 	});
 
-	it("radar and forecast disagree -> caveat says to trust the radar for the present", async () => {
+	it("radar dry, current step wet -> current_step reported and a concrete caveat", async () => {
+		// NOW 09:15 is inside [09:00, 10:00), forecast 0.8 mm there, dry afterwards
+		const t = makeTestDeps({ upstream: { sampleTile: emptyRadarTile(), openMeteo: openMeteo([0.8, 0, 0]) } });
+		const s = (await rainEtaTool({}, t.deps)).structured as Record<string, any>;
+		expect(s.forecast_based).toMatchObject({
+			next_wet_step_at: null,
+			current_step: { start: "2026-09-25T09:00:00.000Z", end: "2026-09-25T10:00:00.000Z", precipitation_mm: 0.8, forecast_wet: true },
+		});
+		expect(s.caveats).toContain(
+			"Radar shows no rain now, but the forecast expects 0.8 mm in the step ending 2026-09-25T10:00:00.000Z; rain may start before then. Trust the radar for the present.",
+		);
+	});
+
+	it("radar wet, current step dry -> current_step reported and the mirror caveat", async () => {
 		const t = makeTestDeps({ upstream: { sampleTile: RAINING, openMeteo: openMeteo([0, 0]) } });
 		const s = (await rainEtaTool({}, t.deps)).structured as Record<string, any>;
-		expect(s.caveats.join(" ")).toMatch(/disagrees/);
+		expect(s.forecast_based.current_step).toMatchObject({ forecast_wet: false, precipitation_mm: 0 });
+		expect(s.caveats.join(" ")).toMatch(/Radar shows rain now, but the forecast expects only 0 mm in the step ending 2026-09-25T10:00:00.000Z; the rain may end before then/);
+	});
+
+	it("radar and current step agree -> no disagreement caveat", async () => {
+		const t = makeTestDeps({ upstream: { sampleTile: RAINING, openMeteo: openMeteo([1, 0]) } });
+		const s = (await rainEtaTool({}, t.deps)).structured as Record<string, any>;
+		expect(s.forecast_based.current_step.forecast_wet).toBe(true);
+		expect(s.caveats.join(" ")).not.toMatch(/Radar shows/);
 	});
 
 	it("no forecast series -> insufficient_data with a reason, and no times at all", async () => {
