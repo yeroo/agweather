@@ -3,7 +3,7 @@ import { ToolError } from "../src/lib/errors";
 import { precipitationNowcastTool } from "../src/tools/precipitation-nowcast";
 import { radarTool } from "../src/tools/radar";
 import { weatherNowTool } from "../src/tools/weather-now";
-import { coverageTile, fixture, hangingRoute, jsonResponse, makeTestDeps, route } from "./helpers";
+import { coverageTile, encodePng, fixture, hangingRoute, jsonResponse, makeTestDeps, route } from "./helpers";
 
 const INDEX = /api\.rainviewer\.com/;
 const OPEN_METEO = /api\.open-meteo\.com/;
@@ -100,6 +100,21 @@ describe("radar coverage", () => {
 		const t = makeTestDeps({ upstream: { coverage: coverageTile(() => false) } });
 		const out = await weatherNowTool({}, t.deps);
 		expect(out.structured.radar_observation).toMatchObject({ center_covered: false, precip_at_point: null, precip_nearby: null });
+	});
+});
+
+describe("point observation readability", () => {
+	it("an unreadable ring (colours not in the table) -> precip_nearby null, not false", async () => {
+		const offTable = encodePng(256, 256, () => [1, 2, 3, 255]);
+		const t = makeTestDeps({ upstream: { sampleTile: offTable } });
+		const out = await weatherNowTool({}, t.deps);
+		expect(out.structured.radar_observation).toMatchObject({ precip_at_point: null, precip_nearby: null, nearby_max_dbz: null });
+	});
+
+	it("a readable dry ring -> precip_nearby false", async () => {
+		const t = makeTestDeps({ upstream: { sampleTile: encodePng(256, 256, () => [0, 0, 0, 0]) } });
+		const out = await weatherNowTool({}, t.deps);
+		expect(out.structured.radar_observation).toMatchObject({ precip_at_point: false, precip_nearby: false });
 	});
 });
 

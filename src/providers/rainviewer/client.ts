@@ -17,6 +17,8 @@ export const RAINVIEWER_TTL = { index: 60, frame: 2 * 3600, coverage: 24 * 3600 
 const SAMPLE_SIZE = 256;
 const SAMPLE_ZOOM = MAX_RADAR_ZOOM;
 const NEARBY_RADIUS_KM = 10;
+/** Share of unreadable (off-table colour) ring pixels above which precip_nearby is reported as unknown. */
+const MAX_UNKNOWN_FRACTION = 0.5;
 
 export const toIso = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
 
@@ -77,7 +79,9 @@ export class RainViewerProvider implements RadarProvider {
 		const knowable = covered !== false;
 		const precipAtPoint =
 			!knowable || sample.center.kind === "unknown" ? null : (atPoint?.min ?? -Infinity) >= PRECIP_THRESHOLD_DBZ;
-		const precipNearby = !knowable ? null : (sample.nearbyMax?.min ?? -Infinity) >= PRECIP_THRESHOLD_DBZ;
+		// If most of the ring could not be read, "no echo nearby" would be a guess: report unknown instead.
+		const nearbyReadable = sample.unknownFraction < MAX_UNKNOWN_FRACTION;
+		const precipNearby = !knowable || !nearbyReadable ? null : (sample.nearbyMax?.min ?? -Infinity) >= PRECIP_THRESHOLD_DBZ;
 
 		return {
 			source: PROVIDER,

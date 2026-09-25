@@ -35,8 +35,10 @@ export const METEOBLUE_NOT_CONFIGURED = {
 	},
 } as const;
 
+export type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
 /** Run a provider call; resolve to { ok, value } or { ok: false, error } so one failure never sinks a tool. */
-export async function settle<T>(p: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+export async function settle<T>(p: Promise<T>): Promise<Settled<T>> {
 	try {
 		return { ok: true, value: await p };
 	} catch (error) {

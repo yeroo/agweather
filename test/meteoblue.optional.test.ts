@@ -65,6 +65,20 @@ describe("meteoblue configured (basic-1h, real fixture)", () => {
 		expect(typeof (out.structured.meteoblue as { wind_speed_kmh?: number }).wind_speed_kmh).toBe("number");
 	});
 
+	it("weather_now: meteoblue answered but has no step for the current hour -> available false with a reason", async () => {
+		const old = { metadata: { modelrun_utc: "2026-09-24 00:00" }, data_1h: { time: ["2026-09-24 01:00"], precipitation: [0] } };
+		const t = makeTestDeps({ meteoblueKey: TEST_METEOBLUE_KEY, upstream: { meteoblue: old } });
+		const out = await weatherNowTool({}, t.deps);
+		expect(out.structured.meteoblue).toEqual({ available: false, reason: expect.stringMatching(/current hour/) });
+	});
+
+	it("weather_now: Open-Meteo answered without current conditions -> available false with a reason", async () => {
+		const noCurrent = { hourly: { time: ["2026-09-25T10:00"], precipitation: [0] } };
+		const t = makeTestDeps({ upstream: { openMeteo: noCurrent } });
+		const out = await weatherNowTool({}, t.deps);
+		expect(out.structured.model_current).toEqual({ available: false, reason: expect.stringMatching(/no current conditions/) });
+	});
+
 	it("rain_eta prefers the meteoblue series when it is available", async () => {
 		const t = makeTestDeps({ meteoblueKey: TEST_METEOBLUE_KEY });
 		const out = await rainEtaTool({}, t.deps);
@@ -96,6 +110,35 @@ describe("meteoblue configured (basic-1h, real fixture)", () => {
 		const out = await precipitationNowcastTool({}, t.deps);
 		expect(out.structured.radar_nowcast).toMatchObject({ available: true, source: "meteoblue", kind: "radar_nowcast" });
 		expect((out.structured.numerical_forecast as { source: string }[]).every((s) => s.source !== "meteoblue")).toBe(true);
+	});
+
+	it("nowcast package that fails -> radar_nowcast says the nowcast request failed, not 'model forecast'", async () => {
+		const t = makeTestDeps({
+			meteoblueKey: TEST_METEOBLUE_KEY,
+			meteobluePackage: "nowcast-15min",
+			routes: [route(METEOBLUE, () => jsonResponse(FREE_TRIAL_403, 403))],
+		});
+		const out = await precipitationNowcastTool({}, t.deps);
+		const reason = (out.structured.radar_nowcast as { reason: string }).reason;
+		expect(out.structured.radar_nowcast).toMatchObject({ available: false });
+		expect(reason).toMatch(/meteoblue nowcast request failed \(provider_not_configured\)/);
+		expect(reason).not.toMatch(/model forecast/);
+	});
+
+	it("nowcast-15min package that succeeds fills radar_nowcast", async () => {
+		const xmin = {
+			metadata: { modelrun_utc: "2026-09-25 09:00" },
+			data_xmin: { time: ["2026-09-25 09:30", "2026-09-25 09:45", "2026-09-25 10:00"], precipitation: [0.1, 0.3, 0] },
+		};
+		const t = makeTestDeps({ meteoblueKey: TEST_METEOBLUE_KEY, meteobluePackage: "nowcast-15min", upstream: { meteoblue: xmin } });
+		const out = await precipitationNowcastTool({}, t.deps);
+		expect(out.structured.radar_nowcast).toMatchObject({ available: true, kind: "radar_nowcast", step_minutes: 15, issued_at: "2026-09-25T09:00:00.000Z" });
+	});
+
+	it("basic package -> reason says it is a model forecast", async () => {
+		const t = makeTestDeps({ meteoblueKey: TEST_METEOBLUE_KEY });
+		const out = await precipitationNowcastTool({}, t.deps);
+		expect((out.structured.radar_nowcast as { reason: string }).reason).toMatch(/"basic-1h" is a model forecast/);
 	});
 
 	it("the API key never reaches logs, cache keys or tool output", async () => {

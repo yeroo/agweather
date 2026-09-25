@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { ToolError, unavailable } from "../lib/errors";
 import { resolveLocation } from "../location/resolve";
-import { METEOBLUE_NOT_CONFIGURED, settle, type ToolDeps, type ToolOutput } from "./deps";
+import type { ForecastResult } from "../types/forecast";
+import { METEOBLUE_NOT_CONFIGURED, type Settled, settle, type ToolDeps, type ToolOutput } from "./deps";
 import { locationFields, locationOut } from "./schemas";
 
 export const weatherNowInput = z.object({ ...locationFields });
@@ -14,6 +15,12 @@ export const weatherNowOutput = z.looseObject({
 	model_current: z.looseObject({}),
 	meteoblue: z.looseObject({}),
 });
+
+/** `available: true` only when the provider answered AND had data for now. */
+function currentBlock(res: Settled<ForecastResult>, missingReason: string): Record<string, unknown> {
+	if (!res.ok) return { ...unavailable(res.error) };
+	return res.value.current ? { available: true, ...res.value.current } : { available: false, reason: missingReason };
+}
 
 export async function weatherNowTool(raw: WeatherNowInput, deps: ToolDeps): Promise<ToolOutput> {
 	const input = weatherNowInput.parse(raw);
@@ -29,21 +36,13 @@ export async function weatherNowTool(raw: WeatherNowInput, deps: ToolDeps): Prom
 		throw new ToolError("provider_unavailable", "No weather provider answered; try again shortly", { retryable: true });
 	}
 
-	const modelCurrent = om.ok
-		? (om.value.current ?? { available: false, reason: "Open-Meteo returned no current conditions" })
-		: unavailable(om.error);
-
 	return {
 		structured: {
 			location,
 			retrieved_at: deps.now().toISOString(),
 			radar_observation: obs.ok ? { available: true, ...obs.value } : unavailable(obs.error),
-			model_current: om.ok ? { available: true, ...modelCurrent } : modelCurrent,
-			meteoblue: !mb
-				? METEOBLUE_NOT_CONFIGURED
-				: mb.ok
-					? { available: true, ...(mb.value.current ?? { reason: "no step covers the current hour" }) }
-					: unavailable(mb.error),
+			model_current: currentBlock(om, "Open-Meteo returned no current conditions"),
+			meteoblue: mb ? currentBlock(mb, "meteoblue returned no forecast step covering the current hour") : METEOBLUE_NOT_CONFIGURED,
 			notes: [
 				"radar_observation is measured (latest radar frame). model_current and meteoblue are weather-model output, not measurements.",
 				"Precipitation and wind values come from different sources and times; compare their timestamps before combining them.",

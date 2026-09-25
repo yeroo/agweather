@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { ToolError, unavailable } from "../lib/errors";
+import { errorPayload, ToolError, unavailable } from "../lib/errors";
 import { resolveLocation } from "../location/resolve";
-import type { PrecipSeries } from "../types/forecast";
-import { METEOBLUE_NOT_CONFIGURED, settle, type ToolDeps, type ToolOutput } from "./deps";
+import type { ForecastResult, PrecipSeries } from "../types/forecast";
+import { METEOBLUE_NOT_CONFIGURED, type Settled, settle, type ToolDeps, type ToolOutput } from "./deps";
 import { locationFields, locationOut } from "./schemas";
 
 export const precipitationNowcastInput = z.object({ ...locationFields });
@@ -15,6 +15,14 @@ export const precipitationNowcastOutput = z.looseObject({
 	radar_nowcast: z.looseObject({}),
 	numerical_forecast: z.array(z.looseObject({})),
 });
+
+/** Why meteoblue did not supply the radar nowcast, depending on its configuration and on this call. */
+function meteoblueNowcastReason(deps: ToolDeps, mb: Settled<ForecastResult> | null): string {
+	if (!deps.meteoblue || !mb) return "and meteoblue is not configured";
+	if (deps.meteoblue.kind !== "radar_nowcast") return `and the meteoblue package "${deps.meteobluePackage}" is a model forecast, not a nowcast`;
+	if (!mb.ok) return `and the meteoblue nowcast request failed (${errorPayload(mb.error).error.code})`;
+	return `and the meteoblue nowcast package "${deps.meteobluePackage}" returned no series`;
+}
 
 export async function precipitationNowcastTool(raw: PrecipitationNowcastInput, deps: ToolDeps): Promise<ToolOutput> {
 	const input = precipitationNowcastInput.parse(raw);
@@ -30,19 +38,17 @@ export async function precipitationNowcastTool(raw: PrecipitationNowcastInput, d
 	}
 
 	const forecasts: PrecipSeries[] = [];
-	let radarNowcast: Record<string, unknown> = {
-		available: false,
-		reason:
-			"No radar-extrapolation nowcast is available: RainViewer stopped publishing nowcast frames" +
-			(deps.meteoblue ? `, and the meteoblue package "${deps.meteobluePackage}" is a model forecast` : ", and meteoblue is not configured"),
-	};
 	if (om.ok) forecasts.push(om.value.primary, ...om.value.extra);
+	let nowcast: PrecipSeries | undefined;
 	if (mb?.ok) {
 		for (const s of [mb.value.primary, ...mb.value.extra]) {
-			if (s.kind === "radar_nowcast") radarNowcast = { available: true, ...s };
+			if (s.kind === "radar_nowcast") nowcast ??= s;
 			else forecasts.push(s);
 		}
 	}
+	const radarNowcast: Record<string, unknown> = nowcast
+		? { available: true, ...nowcast }
+		: { available: false, reason: `No radar-extrapolation nowcast is available: RainViewer stopped publishing nowcast frames, ${meteoblueNowcastReason(deps, mb)}` };
 
 	return {
 		structured: {
