@@ -26,6 +26,8 @@ export interface ResolvedLocation {
 	/** The text that was resolved (the input, or DEFAULT_LOCATION when none was given). */
 	query?: string;
 	is_default: boolean;
+	/** Present when part of "City, Region, Country" could not be confirmed against the result. */
+	match_note?: string;
 }
 
 export interface LocationInput {

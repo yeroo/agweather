@@ -1,24 +1,33 @@
 import { ToolError } from "../lib/errors";
 import type { Geocoder, GeoResult, LocationInput, ResolvedLocation } from "../types/location";
+import { COUNTRY_ALIASES, US_STATES } from "./aliases";
 import { PRESETS } from "./presets";
 
 export const normalize = (s: string) => s.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
 
-/** "Minsk, Belarus" -> { place: "Minsk", qualifier: "Belarus" }. The qualifier may be a country, code or region. */
-export function splitQuery(query: string): { place: string; qualifier?: string } {
+/**
+ * "Houston, Texas, USA" -> { place: "Houston", qualifiers: ["Texas", "USA"] }.
+ * Each qualifier may be a country, country code, region (admin1) or US state code.
+ */
+export function splitQuery(query: string): { place: string; qualifiers: string[] } {
 	const parts = query.split(",").map((p) => p.trim()).filter(Boolean);
-	const place = parts[0] ?? "";
-	const qualifier = parts.length > 1 ? parts.slice(1).join(", ") : undefined;
-	return { place, qualifier };
+	return { place: parts[0] ?? "", qualifiers: parts.slice(1) };
 }
 
-function matchesQualifier(r: GeoResult, qualifier: string): boolean {
+function qualifierMatches(r: GeoResult, qualifier: string): boolean {
 	const q = normalize(qualifier);
-	return [r.country, r.country_code, r.admin1].some((v) => v !== undefined && normalize(v) === q);
+	const values = [r.country, r.country_code, r.admin1].filter((v): v is string => v !== undefined).map(normalize);
+	if (values.includes(q)) return true;
+	const aliasCountry = COUNTRY_ALIASES[q];
+	if (aliasCountry && r.country_code?.toUpperCase() === aliasCountry) return true;
+	const state = US_STATES[qualifier.trim().toUpperCase()];
+	return state !== undefined && r.country_code?.toUpperCase() === "US" && normalize(r.admin1 ?? "") === normalize(state);
 }
 
-function findPreset(place: string, qualifier?: string): GeoResult | undefined {
-	return PRESETS.find((p) => normalize(p.name) === normalize(place) && (!qualifier || matchesQualifier(p, qualifier)));
+const matchCount = (r: GeoResult, qualifiers: readonly string[]) => qualifiers.filter((q) => qualifierMatches(r, q)).length;
+
+function findPreset(place: string, qualifiers: readonly string[]): GeoResult | undefined {
+	return PRESETS.find((p) => normalize(p.name) === normalize(place) && matchCount(p, qualifiers) === qualifiers.length);
 }
 
 export interface ResolveDeps {
@@ -44,21 +53,27 @@ export async function resolveLocation(input: LocationInput, deps: ResolveDeps): 
 
 	const isDefault = input.location === undefined || input.location.trim() === "";
 	const query = isDefault ? deps.defaultLocation : input.location!;
-	const { place, qualifier } = splitQuery(query);
+	const { place, qualifiers } = splitQuery(query);
 	if (!place) throw new ToolError("invalid_input", "location is empty");
 
-	const preset = findPreset(place, qualifier);
+	const preset = findPreset(place, qualifiers);
 	if (preset) return toResolved(preset, "preset", query, isDefault);
 
 	const results = await deps.geocoder.search(place);
-	const candidates = qualifier ? results.filter((r) => matchesQualifier(r, qualifier)) : results;
-	const best = candidates[0];
-	if (!best) {
+	if (results.length === 0) {
 		throw new ToolError("unknown_location", `No place found for "${query}"; try "City, Country" or pass lat/lon`, {
 			provider: deps.geocoder.name,
 		});
 	}
-	return toResolved(best, "geocoder", query, isDefault);
+	// Qualifiers rank results (most matches first, geocoder order otherwise); they never filter to nothing.
+	const ranked = results.map((r, i) => ({ r, i, n: matchCount(r, qualifiers) })).sort((a, b) => b.n - a.n || a.i - b.i);
+	const best = ranked[0]!;
+	const resolved = toResolved(best.r, "geocoder", query, isDefault);
+	if (best.n < qualifiers.length) {
+		const unmatched = qualifiers.filter((q) => !qualifierMatches(best.r, q));
+		resolved.match_note = `Could not confirm ${unmatched.map((q) => `"${q}"`).join(", ")} for any match; using the geocoder's best result (${resolved.name}). Pass lat/lon if this is the wrong place.`;
+	}
+	return resolved;
 }
 
 function toResolved(r: GeoResult, by: ResolvedLocation["resolved_by"], query: string, isDefault: boolean): ResolvedLocation {

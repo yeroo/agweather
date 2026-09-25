@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ToolError } from "../src/lib/errors";
 import { resolveLocation, splitQuery } from "../src/location/resolve";
-import { jsonResponse, makeTestDeps, route } from "./helpers";
+import { fixtureJson, jsonResponse, makeTestDeps, route } from "./helpers";
 
 const GEO = /geocoding-api\.open-meteo\.com/;
 
@@ -78,9 +78,34 @@ describe("resolveLocation", () => {
 		expect(await codeOf(resolveLocation({ location: "Nowhereville Zzz" }, t.deps))).toBe("unknown_location");
 	});
 
-	it("country filter with no match -> unknown_location (no silent fallback to another country)", async () => {
+	it("a qualifier nothing matches falls back to the top result, with a match_note saying so", async () => {
 		const t = makeTestDeps();
-		expect(await codeOf(resolveLocation({ location: "Minsk, Japan" }, t.deps))).toBe("unknown_location");
+		const loc = await resolveLocation({ location: "Minsk, Japan" }, t.deps);
+		expect(loc).toMatchObject({ country_code: "BY", resolved_by: "geocoder" });
+		expect(loc.match_note).toMatch(/"Japan"/);
+	});
+
+	it.each(["Houston, Texas, USA", "Houston, TX", "houston, tx, us", "Houston, United States of America"])(
+		"multi-part and abbreviated qualifiers: %s -> the Houston preset",
+		async (q) => {
+			const t = makeTestDeps();
+			const loc = await resolveLocation({ location: q }, t.deps);
+			expect(loc).toMatchObject({ admin1: "Texas", country_code: "US", resolved_by: "preset" });
+			expect(loc.match_note).toBeUndefined();
+			expect(t.fetch.calls).toHaveLength(0);
+		},
+	);
+
+	it.each(["Paris, Texas", "Paris, TX", "Paris, Texas, USA"])("%s prefers the US result over the more populous French one", async (q) => {
+		const t = makeTestDeps({ upstream: { geocode: fixtureJson("openmeteo-geocode-paris.json") } });
+		const loc = await resolveLocation({ location: q }, t.deps);
+		expect(loc).toMatchObject({ admin1: "Texas", country_code: "US", resolved_by: "geocoder" });
+		expect(loc.match_note).toBeUndefined();
+	});
+
+	it("without a qualifier the geocoder's own ranking wins (Paris -> France)", async () => {
+		const t = makeTestDeps({ upstream: { geocode: fixtureJson("openmeteo-geocode-paris.json") } });
+		expect(await resolveLocation({ location: "Paris" }, t.deps)).toMatchObject({ country_code: "FR" });
 	});
 
 	it("geocoder 500 -> geocoding_failed", async () => {
@@ -98,8 +123,9 @@ describe("resolveLocation", () => {
 });
 
 describe("splitQuery", () => {
-	it("splits 'City, Country' and keeps multi-part qualifiers", () => {
-		expect(splitQuery("Minsk, Belarus")).toEqual({ place: "Minsk", qualifier: "Belarus" });
-		expect(splitQuery("Houston")).toEqual({ place: "Houston" });
+	it("splits 'City, Region, Country' into separate qualifiers", () => {
+		expect(splitQuery("Minsk, Belarus")).toEqual({ place: "Minsk", qualifiers: ["Belarus"] });
+		expect(splitQuery("Houston, Texas , USA")).toEqual({ place: "Houston", qualifiers: ["Texas", "USA"] });
+		expect(splitQuery("Houston")).toEqual({ place: "Houston", qualifiers: [] });
 	});
 });
