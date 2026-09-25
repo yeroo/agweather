@@ -79,9 +79,11 @@ export class RainViewerProvider implements RadarProvider {
 		const knowable = covered !== false;
 		const precipAtPoint =
 			!knowable || sample.center.kind === "unknown" ? null : (atPoint?.min ?? -Infinity) >= PRECIP_THRESHOLD_DBZ;
-		// If most of the ring could not be read, "no echo nearby" would be a guess: report unknown instead.
+		// A readable echo proves precipitation even if other pixels are unreadable (they can only hide echoes).
+		// "No precipitation nearby" is only claimed when most of the ring could be read.
+		const echoNearby = (sample.nearbyMax?.min ?? -Infinity) >= PRECIP_THRESHOLD_DBZ;
 		const nearbyReadable = sample.unknownFraction < MAX_UNKNOWN_FRACTION;
-		const precipNearby = !knowable || !nearbyReadable ? null : (sample.nearbyMax?.min ?? -Infinity) >= PRECIP_THRESHOLD_DBZ;
+		const precipNearby = !knowable ? null : echoNearby ? true : nearbyReadable ? false : null;
 
 		return {
 			source: PROVIDER,

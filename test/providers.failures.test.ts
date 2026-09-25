@@ -111,6 +111,14 @@ describe("point observation readability", () => {
 		expect(out.structured.radar_observation).toMatchObject({ precip_at_point: null, precip_nearby: null, nearby_max_dbz: null });
 	});
 
+	it("a mostly unreadable ring with one readable echo >= 10 dBZ -> precip_nearby true", async () => {
+		// #0088bf = 23 dBZ in the Universal Blue table; everything else is off-table
+		const tile = encodePng(256, 256, (x, y) => (x === 130 && y === 128 ? [0, 136, 191, 255] : [1, 2, 3, 255]));
+		const t = makeTestDeps({ upstream: { sampleTile: tile } });
+		const out = await weatherNowTool({}, t.deps);
+		expect(out.structured.radar_observation).toMatchObject({ precip_nearby: true, nearby_max_dbz: { min: 23, max: 23 }, precip_at_point: null });
+	});
+
 	it("a readable dry ring -> precip_nearby false", async () => {
 		const t = makeTestDeps({ upstream: { sampleTile: encodePng(256, 256, () => [0, 0, 0, 0]) } });
 		const out = await weatherNowTool({}, t.deps);
