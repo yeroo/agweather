@@ -24,19 +24,26 @@ function json(status: number, body: unknown): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-export function allowedHostnames(env: Pick<Env, "PUBLIC_BASE_URL" | "MCP_ALLOWED_HOSTNAMES">): string[] {
-	const hosts = new Set<string>();
+/**
+ * Host names /mcp accepts (DNS-rebinding protection). Passing a list to createMcpHandler replaces its
+ * defaults, so they are re-added here: loopback names, and the request's own *.workers.dev host (the
+ * workers.dev URL and preview URLs keep working when PUBLIC_BASE_URL is a custom domain).
+ */
+export function allowedHostnames(env: Pick<Env, "PUBLIC_BASE_URL" | "MCP_ALLOWED_HOSTNAMES">, requestUrl: URL): string[] {
+	const hosts = new Set<string>(["localhost", "127.0.0.1", "[::1]"]);
+	if (requestUrl.hostname.endsWith(".workers.dev")) hosts.add(requestUrl.hostname);
 	if (env.PUBLIC_BASE_URL) hosts.add(new URL(env.PUBLIC_BASE_URL).hostname);
 	for (const h of (env.MCP_ALLOWED_HOSTNAMES ?? "").split(",")) if (h.trim()) hosts.add(h.trim().toLowerCase());
 	return [...hosts];
 }
 
-export function createWorker(opts: WorkerOptions = {}): ExportedHandler<Env> {
-	// Shared by every request this isolate serves.
-	const caches = opts.caches ?? createCaches();
-	let provider: { key: string; value: OAuthProvider<Env> } | undefined;
+function loggerFor(env: Env, sink?: LogSink) {
+	return createLogger({ secrets: [env.METEOBLUE_API_KEY, env.ACCESS_CLIENT_SECRET, env.COOKIE_ENCRYPTION_KEY], sink });
+}
 
-	const apiHandler = {
+/** The handler OAuthProvider calls for /mcp once the bearer token is valid (ctx.props = the grant's props). */
+export function createApiHandler(opts: WorkerOptions, caches: Caches) {
+	return {
 		async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 			// Defence in depth: OAuthProvider already validated the token; also require the grant to be the owner's,
 			// so a misconfigured Access policy or an old grant for another identity cannot use the tools.
@@ -44,10 +51,7 @@ export function createWorker(opts: WorkerOptions = {}): ExportedHandler<Env> {
 			if (!isOwner(props?.email, env.OWNER_EMAIL)) {
 				return json(403, { error: "forbidden", error_description: "this MCP server is private to its owner" });
 			}
-			const logger = createLogger({
-				secrets: [env.METEOBLUE_API_KEY, env.ACCESS_CLIENT_SECRET, env.COOKIE_ENCRYPTION_KEY],
-				sink: opts.logSink,
-			});
+			const logger = loggerFor(env, opts.logSink);
 			const makeDeps = depsFactory(env, {
 				fetch: opts.fetch ?? ((url, init) => fetch(url, init)),
 				caches,
@@ -58,11 +62,18 @@ export function createWorker(opts: WorkerOptions = {}): ExportedHandler<Env> {
 			// Stateless: a fresh McpServer per request (SDK v2 factory), no Durable Object.
 			const handler = createMcpHandler(() => buildServer(makeDeps, logger), {
 				route: MCP_ROUTE,
-				allowedHostnames: allowedHostnames(env),
+				allowedHostnames: allowedHostnames(env, new URL(request.url)),
 			});
 			return handler(request, env, ctx);
 		},
 	};
+}
+
+export function createWorker(opts: WorkerOptions = {}): ExportedHandler<Env> {
+	// Shared by every request this isolate serves.
+	const caches = opts.caches ?? createCaches();
+	const apiHandler = createApiHandler(opts, caches);
+	let provider: { key: string; value: OAuthProvider<Env> } | undefined;
 
 	function getProvider(env: Env): OAuthProvider<Env> {
 		const base = env.PUBLIC_BASE_URL!.replace(/\/+$/, "");
@@ -72,7 +83,7 @@ export function createWorker(opts: WorkerOptions = {}): ExportedHandler<Env> {
 			apiRoute: MCP_ROUTE,
 			apiHandler,
 			defaultHandler: {
-				fetch: (request, env, ctx) => handleAccessRequest(request, env as EnvWithOAuth, ctx),
+				fetch: (request, env, ctx) => handleAccessRequest(request, env as EnvWithOAuth, ctx, loggerFor(env, opts.logSink)),
 			},
 			authorizeEndpoint: "/authorize",
 			tokenEndpoint: "/token",
@@ -95,7 +106,7 @@ export function createWorker(opts: WorkerOptions = {}): ExportedHandler<Env> {
 			try {
 				p = getProvider(env);
 			} catch (err) {
-				console.error(JSON.stringify({ type: "config_error", error: String(err) }));
+				loggerFor(env, opts.logSink).event({ type: "config_error", error: String(err) });
 				return json(500, { error: "misconfigured", error_description: "invalid OAuth configuration; check PUBLIC_BASE_URL" });
 			}
 			return p.fetch(request as never, env, ctx);

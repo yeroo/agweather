@@ -3,8 +3,14 @@
  * (https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-cf-access, src/workers-oauth-utils.ts),
  * Copyright (c) 2025 Cloudflare, Inc., MIT License (see LICENSE-THIRD-PARTY.md).
  *
- * Changes: `Props` carries only the verified identity (email, sub, name); the upstream
- * Access access_token is no longer stored in the grant. Typing tweak for noUncheckedIndexedAccess.
+ * Changes:
+ * - security fix over the upstream demo: the OAuth state is bound to the consenting browser with a
+ *   `__Host-OAUTH_STATE` cookie (sha256 of the state id) that /callback requires. Upstream accepted a
+ *   valid state from any browser, so an attacker could send the owner an Access link carrying the
+ *   attacker's own approved state and receive a code for the owner's identity;
+ * - token-exchange failures no longer echo the upstream response body to the browser;
+ * - `Props` carries only the verified identity (email, sub, name); the upstream Access access_token
+ *   is no longer stored in the grant; typing tweak for noUncheckedIndexedAccess.
  */
 // workers-oauth-utils.ts
 // OAuth utility functions with CSRF and state validation security fixes
@@ -61,6 +67,11 @@ export interface OAuthStateResult {
 	 * The PKCE code challenge to include in the upstream authorization request
 	 */
 	codeChallenge: string;
+	/**
+	 * Set-Cookie header binding this state to the browser that started the flow
+	 * (checked again at the callback; see validateOAuthState)
+	 */
+	setCookie: string;
 }
 
 /**
@@ -76,6 +87,11 @@ export interface ValidateStateResult {
 	 * The PKCE code verifier to include in the upstream token exchange request
 	 */
 	codeVerifier: string;
+
+	/**
+	 * Set-Cookie header that clears the one-time state-binding cookie
+	 */
+	clearCookie: string;
 }
 
 /**
@@ -253,7 +269,8 @@ export function validateCSRFToken(formData: FormData, request: Request): Validat
  * @param kv - Cloudflare KV namespace for storing OAuth state data
  * @param secret - Secret key used to HMAC-sign the state token
  * @param stateTTL - Time-to-live for OAuth state in seconds (defaults to 600)
- * @returns Object containing the signed state token and PKCE code challenge
+ * @returns Object containing the signed state token, PKCE code challenge, and the Set-Cookie header
+ *   that binds the state to this browser
  */
 export async function createOAuthState(
 	oauthReqInfo: AuthRequest,
@@ -273,7 +290,18 @@ export async function createOAuthState(
 		expirationTtl: stateTTL,
 	});
 
-	return { stateToken, codeChallenge };
+	// Bind the state to the browser that consented: /callback only accepts the state together with
+	// this cookie, so a state (and the attacker's client) cannot be replayed in the owner's browser.
+	const setCookie = `${STATE_COOKIE}=${await sha256Hex(uuid)}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=${stateTTL}`;
+
+	return { stateToken, codeChallenge, setCookie };
+}
+
+const STATE_COOKIE = "__Host-OAUTH_STATE";
+
+async function sha256Hex(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -282,8 +310,10 @@ export async function createOAuthState(
  * @param request - The HTTP request containing state parameter
  * @param kv - Cloudflare KV namespace for storing OAuth state data
  * @param secret - Secret key used to verify the state token HMAC signature
- * @returns Object containing the original OAuth request info, PKCE code verifier, and cookie to clear
- * @throws {OAuthError} If state is missing, has an invalid signature, or is expired/not found in KV
+ * @returns Object containing the original OAuth request info, PKCE code verifier, and the Set-Cookie
+ *   header that clears the state-binding cookie
+ * @throws {OAuthError} If state is missing, has an invalid signature, is not bound to this browser,
+ *   or is expired/not found in KV
  */
 export async function validateOAuthState(
 	request: Request,
@@ -310,6 +340,13 @@ export async function validateOAuthState(
 		throw new OAuthError("invalid_request", "Invalid state signature", 400);
 	}
 
+	// The state must come back in the browser that started the flow (cookie set by createOAuthState).
+	const cookies = (request.headers.get("Cookie") ?? "").split(";").map((c) => c.trim());
+	const bound = cookies.find((c) => c.startsWith(`${STATE_COOKIE}=`))?.substring(STATE_COOKIE.length + 1);
+	if (!bound || bound !== (await sha256Hex(uuid))) {
+		throw new OAuthError("invalid_request", "OAuth state does not belong to this browser session", 400);
+	}
+
 	// Look up by UUID only after signature is verified
 	const storedDataJson = await kv.get(`oauth:state:${uuid}`);
 	if (!storedDataJson) {
@@ -326,7 +363,8 @@ export async function validateOAuthState(
 	// Delete state from KV (one-time use)
 	await kv.delete(`oauth:state:${uuid}`);
 
-	return { oauthReqInfo: stored.oauthReqInfo, codeVerifier: stored.codeVerifier };
+	const clearCookie = `${STATE_COOKIE}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`;
+	return { oauthReqInfo: stored.oauthReqInfo, codeVerifier: stored.codeVerifier, clearCookie };
 }
 
 /**
@@ -876,6 +914,8 @@ export async function fetchUpstreamAuthToken(params: {
 	code?: string;
 	redirect_uri: string;
 	code_verifier: string;
+	/** Called with the upstream status when the exchange fails (the body is not exposed). */
+	onFailure?: (status: number) => void;
 }): Promise<[string, string, null] | [null, null, Response]> {
 	if (!params.code) {
 		return [null, null, new Response("Missing authorization code", { status: 400 })];
@@ -900,14 +940,9 @@ export async function fetchUpstreamAuthToken(params: {
 	});
 
 	if (!response.ok) {
-		const errorText = await response.text();
-		return [
-			null,
-			null,
-			new Response(`Failed to exchange code for token: ${errorText}`, {
-				status: response.status,
-			}),
-		];
+		// Do not echo the upstream body to the browser; report only the status to the caller's logger.
+		params.onFailure?.(response.status);
+		return [null, null, new Response("Sign-in failed: the identity provider did not accept the authorization code", { status: 502 })];
 	}
 
 	const body = (await response.json()) as any;

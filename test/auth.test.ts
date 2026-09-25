@@ -93,8 +93,15 @@ const cookiesFrom = (res: Response) =>
 		.map((c) => c.split(";")[0])
 		.join("; ");
 
-/** Drives the real flow up to the Access callback. Returns the callback response. */
-async function loginFlow(worker: ReturnType<typeof createWorker>, env: Env) {
+/**
+ * Drives the real flow up to the Access callback. Returns the callback response.
+ * `callbackCookie` decides which Cookie header the callback request carries (default: the browser's own cookies).
+ */
+async function loginFlow(
+	worker: ReturnType<typeof createWorker>,
+	env: Env,
+	callbackCookie: (browserCookies: string) => string | undefined = (c) => c,
+) {
 	const call = (req: Request) => worker.fetch!(req as never, env, ctx());
 
 	const reg = await call(
@@ -138,8 +145,15 @@ async function loginFlow(worker: ReturnType<typeof createWorker>, env: Env) {
 	expect(toAccess.origin + toAccess.pathname).toBe(`${OIDC}/authorization`);
 	expect(toAccess.searchParams.get("scope")).toBe("openid email profile");
 
-	const callback = await call(new Request(`${BASE}/callback?code=access-code&state=${encodeURIComponent(toAccess.searchParams.get("state")!)}`));
-	return { callback, client_id, verifier, call };
+	expect(approve.headers.getSetCookie().some((c) => c.startsWith("__Host-OAUTH_STATE="))).toBe(true);
+
+	const cookie = callbackCookie(cookiesFrom(approve));
+	const callback = await call(
+		new Request(`${BASE}/callback?code=access-code&state=${encodeURIComponent(toAccess.searchParams.get("state")!)}`, {
+			headers: cookie ? { cookie } : {},
+		}),
+	);
+	return { callback, client_id, verifier, call, authUrl, approveCookies: cookiesFrom(approve) };
 }
 
 const grantKeys = (env: Env) => [...(env.OAUTH_KV as ReturnType<typeof memoryKv>).store.keys()].filter((k) => k.startsWith("grant:"));
@@ -188,6 +202,8 @@ describe("Access login -> owner-only grant", () => {
 		expect(back.origin + back.pathname).toBe(CLIENT_REDIRECT);
 		expect(back.searchParams.get("state")).toBe("client-state");
 		expect(accessCalls).toEqual([`${OIDC}/token`, `${OIDC}/jwks`]);
+		// the one-time state-binding cookie is cleared
+		expect(callback.headers.getSetCookie().some((c) => /^__Host-OAUTH_STATE=;.*Max-Age=0/.test(c))).toBe(true);
 
 		const grants = grantKeys(env);
 		expect(grants).toHaveLength(1);
@@ -232,6 +248,53 @@ describe("Access login -> owner-only grant", () => {
 		// Defence in depth: the same valid token stops working once its identity is no longer the owner.
 		const denied = await mcp({ ...env, OWNER_EMAIL: "someone-else@example.com" });
 		expect(denied.status).toBe(403);
+	});
+
+	it.each([
+		["no state cookie (state replayed in another browser)", () => undefined],
+		["a different browser's state cookie", () => "__Host-OAUTH_STATE=0000000000000000000000000000000000000000000000000000000000000000"],
+	])("callback with a valid state but %s -> 400, no code exchange, no grant", async (_name, cookie) => {
+		const env = makeEnv();
+		const accessCalls = stubAccess(() => signJwt(goodClaims()));
+		const { callback } = await loginFlow(createWorker(), env, cookie);
+		expect(callback.status).toBe(400);
+		expect(await callback.text()).toMatch(/does not belong to this browser/);
+		expect(accessCalls).toEqual([]); // the Access token endpoint was never called
+		expect(grantKeys(env)).toHaveLength(0);
+	});
+
+	it("already-approved client: /authorize redirects straight to Access and still binds the state to the browser", async () => {
+		const env = makeEnv();
+		stubAccess(() => signJwt(goodClaims()));
+		const worker = createWorker();
+		const first = await loginFlow(worker, env);
+		expect(first.callback.status).toBe(302);
+
+		const again = await first.call(new Request(first.authUrl, { headers: { cookie: first.approveCookies } }));
+		expect(again.status).toBe(302);
+		const toAccess = new URL(again.headers.get("location")!);
+		expect(toAccess.origin + toAccess.pathname).toBe(`${OIDC}/authorization`);
+		const stateCookie = again.headers.getSetCookie().find((c) => c.startsWith("__Host-OAUTH_STATE="));
+		expect(stateCookie).toMatch(/HttpOnly; Secure; Path=\/; SameSite=Lax/);
+
+		const cb = (cookie?: string) =>
+			first.call(
+				new Request(`${BASE}/callback?code=c2&state=${encodeURIComponent(toAccess.searchParams.get("state")!)}`, {
+					headers: cookie ? { cookie } : {},
+				}),
+			);
+		expect((await cb()).status).toBe(400);
+		expect((await cb(stateCookie!.split(";")[0])).status).toBe(302);
+	});
+
+	it("a failed code exchange does not echo the upstream body", async () => {
+		const env = makeEnv();
+		const logs: string[] = [];
+		vi.stubGlobal("fetch", async () => new Response("upstream says: secret internal detail", { status: 400 }));
+		const { callback } = await loginFlow(createWorker({ logSink: (l) => logs.push(l) }), env);
+		expect(callback.status).toBe(502);
+		expect(await callback.text()).not.toContain("secret internal detail");
+		expect(logs.map((l) => JSON.parse(l))).toContainEqual(expect.objectContaining({ stage: "token_exchange", upstream_status: 400 }));
 	});
 
 	it("non-owner identity -> 403 and no grant or token is created", async () => {

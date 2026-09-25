@@ -7,10 +7,13 @@
  * - the id_token is verified with ./id-token (alg, kid, aud, iss, exp) instead of signature + exp only;
  * - the identity must be in OWNER_EMAIL, otherwise 403 and no grant/token is issued;
  * - props carry only { email, sub, name }; the upstream Access access_token is not stored;
- * - no Buffer / nodejs_compat dependency; errors never echo internal details.
+ * - the OAuth state is bound to the browser that consented (state cookie, see workers-oauth-utils);
+ * - no Buffer / nodejs_compat dependency; errors never echo internal details, and everything is
+ *   logged through the redacting logger.
  */
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import type { Env, EnvWithOAuth } from "../env";
+import type { Logger } from "../lib/log";
 import { expectedIssuer, IdTokenError, verifyIdToken } from "./id-token";
 import { isOwner } from "./owner";
 import {
@@ -27,7 +30,12 @@ import {
 	validateOAuthState,
 } from "./workers-oauth-utils";
 
-export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _ctx: ExecutionContext): Promise<Response> {
+export async function handleAccessRequest(
+	request: Request,
+	env: EnvWithOAuth,
+	_ctx: ExecutionContext,
+	logger: Logger,
+): Promise<Response> {
 	const { pathname, searchParams } = new URL(request.url);
 
 	if (request.method === "GET" && pathname === "/authorize") {
@@ -39,8 +47,10 @@ export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _
 
 		// Already approved: no approval form, so no CSRF cookie to clear
 		if (await isClientApproved(request, clientId, env.COOKIE_ENCRYPTION_KEY)) {
-			const { stateToken, codeChallenge } = await createOAuthState(oauthReqInfo, env.OAUTH_KV, env.COOKIE_ENCRYPTION_KEY);
-			return redirectToAccess(request, env, stateToken, codeChallenge);
+			const { stateToken, codeChallenge, setCookie } = await createOAuthState(oauthReqInfo, env.OAUTH_KV, env.COOKIE_ENCRYPTION_KEY);
+			const headers = new Headers();
+			headers.append("Set-Cookie", setCookie);
+			return redirectToAccess(request, env, stateToken, codeChallenge, headers);
 		}
 
 		const { token: csrfToken, setCookie } = generateCSRFProtection();
@@ -77,16 +87,21 @@ export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _
 			}
 
 			const approvedClientCookie = await addApprovedClient(request, state.oauthReqInfo.clientId, env.COOKIE_ENCRYPTION_KEY);
-			const { stateToken, codeChallenge } = await createOAuthState(state.oauthReqInfo, env.OAUTH_KV, env.COOKIE_ENCRYPTION_KEY);
+			const { stateToken, codeChallenge, setCookie } = await createOAuthState(
+				state.oauthReqInfo,
+				env.OAUTH_KV,
+				env.COOKIE_ENCRYPTION_KEY,
+			);
 
-			// Headers (not a plain object) so both Set-Cookie values survive
+			// Headers (not a plain object) so every Set-Cookie value survives
 			const redirectHeaders = new Headers();
 			redirectHeaders.append("Set-Cookie", approvedClientCookie);
 			redirectHeaders.append("Set-Cookie", csrfResult.clearCookie);
+			redirectHeaders.append("Set-Cookie", setCookie);
 			return redirectToAccess(request, env, stateToken, codeChallenge, redirectHeaders);
 		} catch (error) {
 			if (error instanceof OAuthError) return error.toResponse();
-			console.error(JSON.stringify({ type: "auth_error", stage: "authorize", error: String(error) }));
+			logger.event({ type: "auth", stage: "authorize", ok: false, error: String(error) });
 			return new Response("Internal server error", { status: 500 });
 		}
 	}
@@ -94,12 +109,18 @@ export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _
 	if (request.method === "GET" && pathname === "/callback") {
 		let oauthReqInfo: AuthRequest;
 		let codeVerifier: string;
+		let clearStateCookie: string;
 		try {
 			const result = await validateOAuthState(request, env.OAUTH_KV, env.COOKIE_ENCRYPTION_KEY);
 			oauthReqInfo = result.oauthReqInfo;
 			codeVerifier = result.codeVerifier;
+			clearStateCookie = result.clearCookie;
 		} catch (error) {
-			if (error instanceof OAuthError) return error.toResponse();
+			if (error instanceof OAuthError) {
+				logger.event({ type: "auth", stage: "callback", ok: false, reason: error.description });
+				return error.toResponse();
+			}
+			logger.event({ type: "auth", stage: "callback", ok: false, error: String(error) });
 			return new Response("Internal server error", { status: 500 });
 		}
 		if (!oauthReqInfo.clientId) {
@@ -114,6 +135,7 @@ export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _
 			redirect_uri: new URL("/callback", request.url).href,
 			upstream_url: env.ACCESS_TOKEN_URL,
 			code_verifier: codeVerifier,
+			onFailure: (status) => logger.event({ type: "auth", stage: "token_exchange", ok: false, upstream_status: status }),
 		});
 		if (errResponse) return errResponse;
 
@@ -126,12 +148,12 @@ export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _
 			});
 		} catch (error) {
 			const reason = error instanceof IdTokenError ? error.message : "verification failed";
-			console.log(JSON.stringify({ type: "auth", stage: "callback", ok: false, reason }));
+			logger.event({ type: "auth", stage: "callback", ok: false, reason });
 			return new Response(`Sign-in rejected: ${reason}`, { status: 401 });
 		}
 
 		if (claims.email_verified === false || !isOwner(claims.email, env.OWNER_EMAIL)) {
-			console.log(JSON.stringify({ type: "auth", stage: "callback", ok: false, reason: "not_owner" }));
+			logger.event({ type: "auth", stage: "callback", ok: false, reason: "not_owner" });
 			return new Response("Forbidden: this MCP server is private to its owner.", { status: 403 });
 		}
 
@@ -143,8 +165,10 @@ export async function handleAccessRequest(request: Request, env: EnvWithOAuth, _
 			scope: oauthReqInfo.scope,
 			userId: claims.sub,
 		});
-		console.log(JSON.stringify({ type: "auth", stage: "callback", ok: true }));
-		return Response.redirect(redirectTo, 302);
+		logger.event({ type: "auth", stage: "callback", ok: true });
+		const headers = new Headers({ location: redirectTo });
+		headers.append("Set-Cookie", clearStateCookie);
+		return new Response(null, { status: 302, headers });
 	}
 
 	return new Response("Not Found", { status: 404 });
