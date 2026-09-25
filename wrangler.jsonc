@@ -1,0 +1,41 @@
+/**
+ * agweather: personal weather radar MCP server.
+ * Configuration reference: https://developers.cloudflare.com/workers/wrangler/configuration/
+ * Secrets (never in this file): see .env.example and README "Secrets".
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "agweather",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-01",
+	"observability": { "enabled": true },
+	"kv_namespaces": [
+		{
+			// OAuth grants, client registrations and tokens (workers-oauth-provider).
+			// Create with: npx wrangler kv namespace create OAUTH_KV   and paste the id here.
+			"binding": "OAUTH_KV",
+			"id": "<your-kv-namespace-id>"
+		}
+	],
+	"vars": {
+		// Public origin of the deployed Worker (no trailing slash). Used as the OAuth resource / issuer.
+		"PUBLIC_BASE_URL": "https://agweather.<your-subdomain>.workers.dev",
+		// Only these identities (comma-separated) can use the MCP server.
+		"OWNER_EMAIL": "you@example.com",
+		// Location used when a tool is called without one.
+		"DEFAULT_LOCATION": "Minsk, Belarus",
+		// meteoblue package used when METEOBLUE_API_KEY is set (free-trial keys: basic-1h).
+		"METEOBLUE_PACKAGE": "basic-1h"
+	},
+	"secrets": {
+		"required": [
+			"ACCESS_CLIENT_ID",
+			"ACCESS_CLIENT_SECRET",
+			"ACCESS_TOKEN_URL",
+			"ACCESS_AUTHORIZATION_URL",
+			"ACCESS_JWKS_URL",
+			"COOKIE_ENCRYPTION_KEY"
+		]
+	},
+	"dev": { "port": 8788 }
+}
