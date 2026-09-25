@@ -39,6 +39,22 @@ describe("rain_eta", () => {
 		expect(s.motion).toEqual({ available: false, reason: "not_implemented_v1" });
 	});
 
+	it("never reports a step start before now: radar dry, but the step already under way is wet", async () => {
+		// NOW is 09:15; the first step [09:00, 10:00) is wet, the rest dry then wet again
+		const t = makeTestDeps({ upstream: { sampleTile: emptyRadarTile(), openMeteo: openMeteo([0.8, 0, 0.5]) } });
+		const s = (await rainEtaTool({}, t.deps)).structured as Record<string, any>;
+		expect(s.observation.raining_now_observed).toBe(false);
+		expect(s.forecast_based.next_wet_step_at).toBe("2026-09-25T11:00:00.000Z");
+		expect(Date.parse(s.forecast_based.next_wet_step_at)).toBeGreaterThanOrEqual(Date.parse(s.retrieved_at));
+	});
+
+	it("never reports a step start before now: radar wet, but the step already under way is dry", async () => {
+		const t = makeTestDeps({ upstream: { sampleTile: RAINING, openMeteo: openMeteo([0, 1, 0]) } });
+		const s = (await rainEtaTool({}, t.deps)).structured as Record<string, any>;
+		expect(s.forecast_based.first_dry_step_at).toBe("2026-09-25T11:00:00.000Z");
+		expect(Date.parse(s.forecast_based.first_dry_step_at)).toBeGreaterThanOrEqual(Date.parse(s.retrieved_at));
+	});
+
 	it("uses the native hourly series, never the possibly-interpolated 15-minute one", async () => {
 		const t = makeTestDeps({ upstream: { sampleTile: RAINING, openMeteo: openMeteo([1, 1, 0]) } });
 		const s = (await rainEtaTool({}, t.deps)).structured as Record<string, any>;

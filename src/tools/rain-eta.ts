@@ -68,16 +68,21 @@ export async function rainEtaTool(raw: RainEtaInput, deps: ToolDeps): Promise<To
 		const basis = observedRain === null ? "forecast_first_step" : "radar_observation";
 		const wetNow = observedRain ?? wet(series.steps[0]!.precipitation_mm);
 
+		// Transitions are searched only in steps that start at or after now, so a reported time is never in
+		// the past. With a radar basis the radar describes the present, not the step already under way; with a
+		// forecast basis step 0 defines the present state, so any transition lies in a later step anyway.
+		const nowMs = deps.now().getTime();
+		const upcoming = basis === "radar_observation" ? series.steps.filter((s) => Date.parse(s.start) >= nowMs) : series.steps;
 		let firstDry: string | null = null;
 		let nextWet: string | null = null;
 		if (wetNow) {
-			const iDry = series.steps.findIndex((s) => !wet(s.precipitation_mm));
+			const iDry = upcoming.findIndex((s) => !wet(s.precipitation_mm));
 			if (iDry >= 0) {
-				firstDry = series.steps[iDry]!.start;
-				nextWet = series.steps.slice(iDry).find((s) => wet(s.precipitation_mm))?.start ?? null;
+				firstDry = upcoming[iDry]!.start;
+				nextWet = upcoming.slice(iDry).find((s) => wet(s.precipitation_mm))?.start ?? null;
 			}
 		} else {
-			nextWet = series.steps.find((s) => wet(s.precipitation_mm))?.start ?? null;
+			nextWet = upcoming.find((s) => wet(s.precipitation_mm))?.start ?? null;
 		}
 
 		if (observedRain !== null && observedRain !== wet(series.steps[0]!.precipitation_mm)) {
