@@ -1,68 +1,64 @@
-import { describe, expect, it } from "vitest";
-import type { Env } from "../src/env";
-import { createApiHandler } from "../src/index";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearJwksCache } from "../src/auth/id-token";
+import { createApiHandler, createWorker } from "../src/index";
 import { createCaches } from "../src/lib/cache";
-import { memoryKv } from "./helpers";
+import { makeEnv, mcpToolsList, OWNER, obtainToken } from "./auth-flow";
+import { mockFetch, upstreamRoutes } from "./helpers";
 
-const OWNER = "owner@example.com";
+const CUSTOM = "https://weather.example.com";
 
-function env(over: Partial<Env> = {}): Env {
-	return {
-		OAUTH_KV: memoryKv(),
-		PUBLIC_BASE_URL: "https://weather.example.com",
-		OWNER_EMAIL: OWNER,
-		ACCESS_CLIENT_ID: "id",
-		ACCESS_CLIENT_SECRET: "secret",
-		ACCESS_TOKEN_URL: "https://t.example/token",
-		ACCESS_AUTHORIZATION_URL: "https://t.example/authorization",
-		ACCESS_JWKS_URL: "https://t.example/jwks",
-		COOKIE_ENCRYPTION_KEY: "k".repeat(64),
-		...over,
-	};
-}
+beforeEach(() => clearJwksCache());
+afterEach(() => vi.unstubAllGlobals());
 
-/** Calls the /mcp API handler as OAuthProvider would after a valid token (props = the owner's grant). */
-async function listTools(url: string, host: string, e: Env = env()): Promise<number> {
-	const handler = createApiHandler({ logSink: () => {} }, createCaches());
-	const res = await handler.fetch(
-		new Request(url, {
-			method: "POST",
-			headers: {
-				host,
-				"content-type": "application/json",
-				accept: "application/json, text/event-stream",
-				"mcp-protocol-version": "2025-06-18",
-			},
-			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
-		}),
-		e,
-		{ waitUntil() {}, passThroughOnException() {}, props: { email: OWNER, sub: "u" } } as unknown as ExecutionContext,
-	);
-	return res.status;
-}
+describe("/mcp is served on the PUBLIC_BASE_URL origin only (through createWorker, real token)", () => {
+	it("custom-domain PUBLIC_BASE_URL: 200 there; the workers.dev and loopback origins are rejected", async () => {
+		const env = makeEnv({ PUBLIC_BASE_URL: CUSTOM });
+		const worker = createWorker({ fetch: mockFetch(...upstreamRoutes()).fetch, logSink: () => {} });
+		const token = await obtainToken(worker, env);
 
-describe("/mcp Host allow-list with a custom-domain PUBLIC_BASE_URL", () => {
+		const ok = await mcpToolsList(worker, env, `${CUSTOM}/mcp`, token);
+		expect(ok.status).toBe(200);
+		expect(await ok.text()).toContain('"name":"radar"');
+
+		// The token's audience is `${CUSTOM}/mcp`; OAuthProvider rejects it on other origins before our handler runs.
+		for (const url of ["https://agweather.me.workers.dev/mcp", "http://127.0.0.1:8788/mcp"]) {
+			const res = await mcpToolsList(worker, env, url, token);
+			expect(res.status).toBe(401);
+			expect(res.headers.get("www-authenticate")).toMatch(/invalid_token/);
+		}
+	});
+
+	it("local dev: PUBLIC_BASE_URL http://localhost:8788 works on exactly that URL", async () => {
+		const env = makeEnv({ PUBLIC_BASE_URL: "http://localhost:8788" });
+		const worker = createWorker({ fetch: mockFetch(...upstreamRoutes()).fetch, logSink: () => {} });
+		const token = await obtainToken(worker, env);
+		expect((await mcpToolsList(worker, env, "http://localhost:8788/mcp", token)).status).toBe(200);
+		expect((await mcpToolsList(worker, env, "http://127.0.0.1:8788/mcp", token)).status).toBe(401);
+	});
+});
+
+describe("/mcp Host header check (DNS-rebinding protection)", () => {
+	/** Calls the API handler directly, as OAuthProvider does after a valid token, with a chosen Host header. */
+	async function status(host: string) {
+		const res = await createApiHandler({ logSink: () => {} }, createCaches()).fetch(
+			new Request(`${CUSTOM}/mcp`, {
+				method: "POST",
+				headers: { host, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+			}),
+			makeEnv({ PUBLIC_BASE_URL: CUSTOM }),
+			{ waitUntil() {}, passThroughOnException() {}, props: { email: OWNER.toLowerCase(), sub: "u" } } as unknown as ExecutionContext,
+		);
+		return res.status;
+	}
+
 	it("accepts the PUBLIC_BASE_URL host", async () => {
-		expect(await listTools("https://weather.example.com/mcp", "weather.example.com")).toBe(200);
+		expect(await status("weather.example.com")).toBe(200);
 	});
 
-	it("still accepts the Worker's own workers.dev host (and preview hosts)", async () => {
-		expect(await listTools("https://agweather.me.workers.dev/mcp", "agweather.me.workers.dev")).toBe(200);
-		expect(await listTools("https://abc123-agweather.me.workers.dev/mcp", "abc123-agweather.me.workers.dev")).toBe(200);
-	});
-
-	it("still accepts loopback hosts for wrangler dev", async () => {
-		expect(await listTools("http://127.0.0.1:8788/mcp", "127.0.0.1:8788")).toBe(200);
-		expect(await listTools("http://localhost:8788/mcp", "localhost:8788")).toBe(200);
-	});
-
-	it("accepts extra hosts from MCP_ALLOWED_HOSTNAMES", async () => {
-		expect(await listTools("https://alt.example.org/mcp", "alt.example.org", env({ MCP_ALLOWED_HOSTNAMES: "alt.example.org" }))).toBe(200);
-	});
-
-	it("rejects any other Host (DNS-rebinding protection)", async () => {
-		expect(await listTools("https://weather.example.com/mcp", "evil.example")).toBe(403);
-		// a workers.dev Host header on a request that did not arrive on that workers.dev URL
-		expect(await listTools("https://weather.example.com/mcp", "attacker.workers.dev")).toBe(403);
+	it("rejects a foreign Host", async () => {
+		expect(await status("evil.example")).toBe(403);
+		expect(await status("attacker.workers.dev")).toBe(403);
+		expect(await status("127.0.0.1")).toBe(403);
 	});
 });

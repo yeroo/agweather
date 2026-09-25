@@ -11,8 +11,6 @@ export interface Env {
 	OWNER_EMAIL?: string;
 	/** Location used when a tool is called without one. Default "Minsk, Belarus". */
 	DEFAULT_LOCATION?: string;
-	/** Extra Host names the MCP endpoint accepts (comma-separated), e.g. a custom domain. */
-	MCP_ALLOWED_HOSTNAMES?: string;
 	/** meteoblue package, default "basic-1h". */
 	METEOBLUE_PACKAGE?: string;
 	/** Override for the expected id_token issuer (defaults to ACCESS_TOKEN_URL without "/token"). */

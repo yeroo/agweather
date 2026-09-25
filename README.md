@@ -60,6 +60,7 @@ npm run dev                   # wrangler dev on http://localhost:8788
 
 For `wrangler dev`, put `PUBLIC_BASE_URL=http://localhost:8788` in `.dev.vars` (it overrides the var in
 `wrangler.jsonc`) and add `http://localhost:8788/callback` as a second redirect URL in the Access application.
+Connect the client to exactly `http://localhost:8788/mcp`, not `127.0.0.1`: see "One origin" below.
 
 `npm run build` (`wrangler deploy --dry-run --outdir dist`) bundles without deploying. The bundle is about 280 KB
 gzipped.
@@ -74,8 +75,12 @@ gzipped.
 4. Create the Access application (next section) and set the secrets (the section after that).
 5. `npm run deploy`
 
-If you use a custom domain, set `PUBLIC_BASE_URL` to it; its host name is accepted automatically. `/mcp` also accepts
-the Worker's own `*.workers.dev` host and loopback names. Only list *additional* host names in `MCP_ALLOWED_HOSTNAMES`.
+### One origin
+
+`/mcp` is served on the `PUBLIC_BASE_URL` origin only. Tokens are issued for `${PUBLIC_BASE_URL}/mcp`, and a token
+is rejected on any other origin, so point your MCP client at exactly that URL. To use a custom domain, set
+`PUBLIC_BASE_URL` to it and redeploy. After that, the `*.workers.dev` URL no longer serves `/mcp`; reconnect the
+client to the new URL.
 
 ## Cloudflare Access / OAuth configuration
 

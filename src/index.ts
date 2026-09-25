@@ -25,16 +25,12 @@ function json(status: number, body: unknown): Response {
 }
 
 /**
- * Host names /mcp accepts (DNS-rebinding protection). Passing a list to createMcpHandler replaces its
- * defaults, so they are re-added here: loopback names, and the request's own *.workers.dev host (the
- * workers.dev URL and preview URLs keep working when PUBLIC_BASE_URL is a custom domain).
+ * Host names /mcp accepts (DNS-rebinding protection): only the PUBLIC_BASE_URL host. Tokens are issued
+ * for the resource `${PUBLIC_BASE_URL}/mcp`, and OAuthProvider rejects them on any other origin before
+ * this handler runs, so accepting further hosts here would be dead configuration.
  */
-export function allowedHostnames(env: Pick<Env, "PUBLIC_BASE_URL" | "MCP_ALLOWED_HOSTNAMES">, requestUrl: URL): string[] {
-	const hosts = new Set<string>(["localhost", "127.0.0.1", "[::1]"]);
-	if (requestUrl.hostname.endsWith(".workers.dev")) hosts.add(requestUrl.hostname);
-	if (env.PUBLIC_BASE_URL) hosts.add(new URL(env.PUBLIC_BASE_URL).hostname);
-	for (const h of (env.MCP_ALLOWED_HOSTNAMES ?? "").split(",")) if (h.trim()) hosts.add(h.trim().toLowerCase());
-	return [...hosts];
+export function allowedHostnames(env: Pick<Env, "PUBLIC_BASE_URL">): string[] {
+	return env.PUBLIC_BASE_URL ? [new URL(env.PUBLIC_BASE_URL).hostname] : [];
 }
 
 function loggerFor(env: Env, sink?: LogSink) {
@@ -62,7 +58,7 @@ export function createApiHandler(opts: WorkerOptions, caches: Caches) {
 			// Stateless: a fresh McpServer per request (SDK v2 factory), no Durable Object.
 			const handler = createMcpHandler(() => buildServer(makeDeps, logger), {
 				route: MCP_ROUTE,
-				allowedHostnames: allowedHostnames(env, new URL(request.url)),
+				allowedHostnames: allowedHostnames(env),
 			});
 			return handler(request, env, ctx);
 		},

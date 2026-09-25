@@ -25,9 +25,7 @@
 		// Location used when a tool is called without one.
 		"DEFAULT_LOCATION": "Minsk, Belarus",
 		// meteoblue package used when METEOBLUE_API_KEY is set (free-trial keys: basic-1h).
-		"METEOBLUE_PACKAGE": "basic-1h",
-		// Extra Host names accepted on /mcp, e.g. a custom domain (comma-separated).
-		"MCP_ALLOWED_HOSTNAMES": ""
+		"METEOBLUE_PACKAGE": "basic-1h"
 	},
 	"secrets": {
 		"required": [
