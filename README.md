@@ -74,7 +74,8 @@ gzipped.
 4. Create the Access application (next section) and set the secrets (the section after that).
 5. `npm run deploy`
 
-If you use a custom domain, set `PUBLIC_BASE_URL` to it and add the host name to `MCP_ALLOWED_HOSTNAMES`.
+If you use a custom domain, set `PUBLIC_BASE_URL` to it; its host name is accepted automatically. `/mcp` also accepts
+the Worker's own `*.workers.dev` host and loopback names. Only list *additional* host names in `MCP_ALLOWED_HOSTNAMES`.
 
 ## Cloudflare Access / OAuth configuration
 
@@ -93,7 +94,9 @@ The Worker verifies the returned `id_token` itself: RS256 signature by a key fro
 `aud` = client id, `iss` = your Access OIDC issuer (the token URL without `/token`; override with the var
 `ACCESS_ISSUER` if needed) and not expired. It then checks the email against `OWNER_EMAIL` (case-insensitive,
 comma-separated). Anyone else gets a 403 and no token. The check runs again on every `/mcp` request, so even a
-misconfigured Access policy cannot open the server.
+misconfigured Access policy cannot open the server. The login is also bound to the browser that approved the client
+(an `__Host-OAUTH_STATE` cookie that `/callback` requires), so a link carrying someone else's approval cannot be
+replayed in your browser.
 
 Do **not** also put a self-hosted Access application in front of the Worker's hostname. Access for SaaS is only the
 login here, and a self-hosted app in front would block the MCP client's API calls.
@@ -107,7 +110,7 @@ Nothing secret goes into `wrangler.jsonc` or git.
 |---|---|
 | `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET` | From the Access for SaaS application |
 | `ACCESS_TOKEN_URL`, `ACCESS_AUTHORIZATION_URL`, `ACCESS_JWKS_URL` | Its token, authorization and key (JWKS) endpoints |
-| `COOKIE_ENCRYPTION_KEY` | Random, e.g. `openssl rand -hex 32` (signs the approval and state cookies) |
+| `COOKIE_ENCRYPTION_KEY` | Random, e.g. `openssl rand -hex 32`. HMAC key for the "approved clients" cookie and the OAuth `state` sent to Access. (The `__Host-OAUTH_STATE` cookie that binds a login to your browser is a SHA-256 of the state id and needs no key.) |
 | `METEOBLUE_API_KEY` | Optional; enables meteoblue |
 
 Logs never contain tokens or keys: every log line goes through a redactor, and the meteoblue URL (which carries the
@@ -126,7 +129,10 @@ The server URL is `https://<your-worker>/mcp` (Streamable HTTP).
 ## Default location
 
 `DEFAULT_LOCATION` in `wrangler.jsonc` (default `"Minsk, Belarus"`) is used whenever a tool is called without
-`location` or `lat`/`lon`. It accepts anything `location` accepts: `"City"`, `"City, Country"` or `"City, Region"`.
+`location` or `lat`/`lon`. It accepts anything `location` accepts: `"City"`, `"City, Country"`, `"City, Region"` or
+`"City, Region, Country"`, including US state codes and common country short forms (`"Houston, TX"`, `"Paris, Texas, USA"`).
+Qualifiers rank the geocoder's matches. If none match, the top match is used, and `location.match_note` says that the
+qualifier was not confirmed.
 Minsk, Barcelona and Houston are built-in presets and resolve without a network call. Other names go through Open-Meteo
 geocoding and are cached. The resolved name, region and country are always echoed back in `location`.
 
@@ -182,7 +188,7 @@ Abridged `radar()` result (the images follow as MCP `image` blocks, each precede
     "requested_radius_km": 150, "effective_radius_km": 184.5,
     "center_px": [256, 256], "north_up": true,
     "frames": [
-      { "time": 1790320200, "time_iso": "2026-09-25T08:20:00.000Z", "url": "https://tilecache.rainviewer.com/v2/radar/…/512/6/53.9000/27.5667/2/1_1.png", "image_index": 0 }
+      { "time": 1790324400, "time_iso": "2026-09-25T08:20:00.000Z", "url": "https://tilecache.rainviewer.com/v2/radar/…/512/6/53.9000/27.5667/2/1_1.png", "image_index": 0 }
     ],
     "nowcast": { "available": false, "reason": "RainViewer no longer publishes nowcast frames" }
   }

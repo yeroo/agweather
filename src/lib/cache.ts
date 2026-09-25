@@ -37,10 +37,6 @@ export class TtlCache<V> {
 	keys(): string[] {
 		return [...this.entries.keys()];
 	}
-
-	get size(): number {
-		return this.entries.size;
-	}
 }
 
 export interface Caches {
